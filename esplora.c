@@ -375,9 +375,6 @@ static struct command_result *getutxout(struct command *cmd, const char *buf,
   bool spent = false;
   jsmntok_t *tokens;
   struct bitcoin_tx_output output;
-  bool valid = false;
-  if (debug) 
-    plugin_log(cmd->plugin, LOG_INFORM, "getutxout");
 
   /* bitcoin-cli wants strings. */
   if (!param(cmd, buf, toks,
