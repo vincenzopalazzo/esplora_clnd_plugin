@@ -20,16 +20,22 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <plugins/libplugin.h>
+#include <unistd.h>
+
+static int blockhash_pattern_len = strlen("00000000b46602a020c3989332346234238e4c066b4c8a39be1e354aa4618c02");
 
 static char *endpoint = NULL;
 static char *cainfo_path = NULL;
 static char *capath = NULL;
 static u64 verbose = 0;
+static bool debug = false;
+static long wait_time = 1000000;
 
 struct curl_memory_data {
-  u8 *memory;
+  char *buffer;
   size_t size;
 };
+
 
 static bool get_u32_from_string(const tal_t *ctx, u32 *parsed_number,
                                 const char *str, const char **err) {
@@ -60,28 +66,28 @@ static size_t write_memory_callback(void *contents, size_t size, size_t nmemb,
                                     void *userp) {
   size_t realsize = size * nmemb;
   struct curl_memory_data *mem = (struct curl_memory_data *)userp;
-
-  if (!tal_resize(&mem->memory, mem->size + realsize + 1)) {
+  if (!tal_resize(&mem->buffer, mem->size + realsize + 1)) {
     /* out of memory! */
     fprintf(stderr, "not enough memory (realloc returned NULL)\n");
     return 0;
   }
 
-  memcpy(&(mem->memory[mem->size]), contents, realsize);
+  memcpy(&(mem->buffer[mem->size]), contents, realsize);
   mem->size += realsize;
-  mem->memory[mem->size] = 0;
+  mem->buffer[mem->size] = '\0';
 
   return realsize;
 }
 
-static u8 *request(const tal_t *ctx, const char *url, const bool post,
+static char *request(const struct command *cmd, const tal_t *ctx, const char *url, const bool post,
                    const char *data) {
   struct curl_memory_data chunk;
-  chunk.memory = tal_arr(ctx, u8, 64);
+  chunk.buffer = tal_arr(ctx, char, 8);
   chunk.size = 0;
 
   CURL *curl;
   CURLcode res;
+  struct curl_slist* headers = NULL;
   curl = curl_easy_init();
   if (!curl) {
     return NULL;
@@ -89,6 +95,8 @@ static u8 *request(const tal_t *ctx, const char *url, const bool post,
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+  headers = curl_slist_append(headers, "Content-Type: application/json");
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   if (verbose != 0)
     curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
   if (cainfo_path != NULL)
@@ -104,24 +112,36 @@ static u8 *request(const tal_t *ctx, const char *url, const bool post,
 
   res = curl_easy_perform(curl);
   if (res != CURLE_OK) {
-    return tal_free(chunk.memory);
+    plugin_log(cmd->plugin, LOG_INFORM, "Error code: %d", res);
+    return tal_free(chunk.buffer);
   }
+  
   long response_code;
+  label:
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
   if (response_code != 200) {
-    return tal_free(chunk.memory);
+    plugin_log(cmd->plugin, LOG_INFORM, "Error code: %ld", response_code);
+    int time = 0;
+    if(time < 4){
+      time++;
+      plugin_log(cmd->plugin, LOG_INFORM, "bad code answare, wait %ld before retry", wait_time);
+      sleep(wait_time);
+      plugin_log(cmd->plugin, LOG_INFORM, "Retry request to server");
+      goto label;
+    }
+    return tal_free(chunk.buffer);
   }
   curl_easy_cleanup(curl);
-  tal_resize(&chunk.memory, chunk.size);
-  return chunk.memory;
+  tal_resize(&chunk.buffer, chunk.size);
+  return(char *) chunk.buffer;
 }
 
-static char *request_get(const tal_t *ctx, const char *url) {
-  return (char *)request(ctx, url, false, NULL);
+static char *request_get(const struct command *cmd, const tal_t *ctx, const char *url) {
+  return request(cmd, ctx, url, false, NULL);
 }
 
-static char *request_post(const tal_t *ctx, const char *url, const char *data) {
-  return (char *)request(ctx, url, true, data);
+static char *request_post(const struct command *cmd, const tal_t *ctx, const char *url, const char *data) {
+  return request(cmd, ctx, url, true, data);
 }
 
 static char *get_network_from_genesis_block(const char *blockhash) {
@@ -152,29 +172,33 @@ static struct command_result *getchaininfo(struct command *cmd,
   if (!param(cmd, buf, toks, NULL))
     return command_param_failed();
 
-  plugin_log(cmd->plugin, LOG_INFORM, "getchaininfo");
+  if(debug)
+    plugin_log(cmd->plugin, LOG_INFORM, "getchaininfo");
 
   // fetch block genesis hash
   const char *block_genesis_url =
       tal_fmt(cmd->plugin, "%s/block-height/0", endpoint);
-  const char *block_genesis = request_get(cmd, block_genesis_url);
+  const char *block_genesis = request_get(cmd, cmd, block_genesis_url);
   if (!block_genesis) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname,
                   block_genesis_url);
     return command_done_err(cmd, BCLI_ERROR, err, NULL);
   }
-  plugin_log(cmd->plugin, LOG_INFORM, "block_genesis: %s", block_genesis);
+  
+  if(debug)
+    plugin_log(cmd->plugin, LOG_INFORM, "block_genesis: %s", block_genesis);
 
   // fetch block count
   const char *blockcount_url =
       tal_fmt(cmd->plugin, "%s/blocks/tip/height", endpoint);
-  const char *blockcount = request_get(cmd, blockcount_url);
+  const char *blockcount = request_get(cmd, cmd, blockcount_url);
   if (!blockcount) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname,
                   blockcount_url);
     return command_done_err(cmd, BCLI_ERROR, err, NULL);
   }
-  plugin_log(cmd->plugin, LOG_INFORM, "blockcount: %s", blockcount);
+  if (debug)
+    plugin_log(cmd->plugin, LOG_INFORM, "blockcount: %s", blockcount);
 
   const char *error;
   u32 height;
@@ -226,31 +250,34 @@ static struct command_result *getrawblockbyheight(struct command *cmd,
 
   if (!param(cmd, buf, toks, p_req("height", param_number, &height), NULL))
     return command_param_failed();
-
-  plugin_log(cmd->plugin, LOG_INFORM, "getrawblockbyheight %d", *height);
+  if (debug)
+    plugin_log(cmd->plugin, LOG_INFORM, "getrawblockbyheight %d", *height);
 
   // fetch blockhash from block height
   const char *blockhash_url =
       tal_fmt(cmd->plugin, "%s/block-height/%d", endpoint, *height);
-  const char *blockhash = request_get(cmd, blockhash_url);
+  const char *blockhash = request_get(cmd, cmd, blockhash_url);
   if (!blockhash) {
     // block not found as getrawblockbyheight_notfound
     return getrawblockbyheight_notfound(cmd);
   }
   plugin_log(cmd->plugin, LOG_INFORM, "blockhash: %s from %s", blockhash,
              blockhash_url);
-
+  if (debug) {
+    int hash_len = strlen(blockhash);
+    plugin_log(cmd->plugin, LOG_INFORM, "Hash size %d = Patters Size %d", hash_len, blockhash_pattern_len);
+    //assert(hash_len == blockhash_pattern_len);
+  }
   // Esplora serves raw block
   const char *block_url =
       tal_fmt(cmd->plugin, "%s/block/%s/raw", endpoint, blockhash);
-  const u8 *block_res = request(cmd, block_url, false, NULL);
+  const char *block_res = request(cmd, cmd, block_url, false, NULL);
   if (!block_res) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname, block_url);
     plugin_log(cmd->plugin, LOG_INFORM, "%s", err);
     // block not found as getrawblockbyheight_notfound
     return getrawblockbyheight_notfound(cmd);
   }
-
   // parse rawblock output
   const char *rawblock =
       tal_hexstr(cmd->plugin, block_res, tal_count(block_res));
@@ -285,7 +312,7 @@ static struct command_result *estimatefees(struct command *cmd,
 
   // fetch feerates
   const char *feerate_url = tal_fmt(cmd->plugin, "%s/fee-estimates", endpoint);
-  const char *feerate_res = request_get(cmd, feerate_url);
+  const char *feerate_res = request_get(cmd, cmd, feerate_url);
   if (!feerate_res) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname, feerate_url);
     plugin_log(cmd->plugin, LOG_INFORM, "err: %s", err);
@@ -350,12 +377,14 @@ static struct command_result *getutxout(struct command *cmd, const char *buf,
   jsmntok_t *tokens;
   struct bitcoin_tx_output output;
   bool valid = false;
-
-  plugin_log(cmd->plugin, LOG_INFORM, "getutxout");
+  if (debug) 
+    plugin_log(cmd->plugin, LOG_INFORM, "getutxout");
 
   /* bitcoin-cli wants strings. */
-  if (!param(cmd, buf, toks, p_req("txid", param_string, &txid),
-             p_req("vout", param_string, &vout), NULL))
+  if (!param(cmd, buf, toks,
+             p_req("txid", param_string, &txid),
+             p_req("vout", param_string, &vout),
+             NULL))
     return command_param_failed();
 
   // convert vout to number
@@ -370,7 +399,7 @@ static struct command_result *getutxout(struct command *cmd, const char *buf,
   // check transaction output is spent
   const char *status_url =
       tal_fmt(cmd->plugin, "%s/tx/%s/outspend/%s", endpoint, txid, vout);
-  const char *status_res = request_get(cmd, status_url);
+  const char *status_res = request_get(cmd, cmd, status_url);
   if (!status_res) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname, status_url);
     return command_done_err(cmd, BCLI_ERROR, err, NULL);
@@ -400,7 +429,7 @@ static struct command_result *getutxout(struct command *cmd, const char *buf,
 
   // get transaction information
   const char *gettx_url = tal_fmt(cmd->plugin, "%s/tx/%s", endpoint, txid);
-  const char *gettx_res = request_get(cmd, gettx_url);
+  const char *gettx_res = request_get(cmd, cmd, gettx_url);
   if (!gettx_res) {
     err = tal_fmt(cmd, "%s: request error on %s", cmd->methodname, gettx_url);
     return command_done_err(cmd, BCLI_ERROR, err, NULL);
@@ -474,12 +503,12 @@ static struct command_result *sendrawtransaction(struct command *cmd,
   /* bitcoin-cli wants strings. */
   if (!param(cmd, buf, toks, p_req("tx", param_string, &tx), NULL))
     return command_param_failed();
-
-  plugin_log(cmd->plugin, LOG_INFORM, "sendrawtransaction");
+  if(debug)
+    plugin_log(cmd->plugin, LOG_INFORM, "sendrawtransaction");
 
   // request post passing rawtransaction
   const char *sendrawtx_url = tal_fmt(cmd->plugin, "%s/tx", endpoint);
-  const char *res = request_post(cmd, sendrawtx_url, tx);
+  const char *res = request_post(cmd, cmd, sendrawtx_url, tx);
   struct json_stream *response = jsonrpc_stream_success(cmd);
   if (!res) {
     // send response with failure
@@ -535,5 +564,11 @@ int main(int argc, char *argv[]) {
               plugin_option("esplora-verbose", "int",
                             "Set verbose output (default 0).", u64_option,
                             &verbose),
+              plugin_option("debug-esplora", "bool",
+                            "Run esplora plugin in debug mode (default false)",
+                            charp_option, &debug),
+              plugin_option("esplora-retry-time", "int",
+                            "Set retry time in case of errors with the esplora API (default 100000)",
+                            charp_option, &wait_time),
               NULL);
 }
