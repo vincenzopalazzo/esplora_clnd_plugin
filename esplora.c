@@ -354,8 +354,8 @@ static struct command_result *estimatefees(struct command *cmd,
 		return estimatefees_null_response(cmd);
 	}
 	// parse feerates output
-	const jsmntok_t *tokens =
-	    json_parse_input(cmd, feerate_res, strlen(feerate_res), &valid);
+  const jsmntok_t *tokens =
+      json_parse_simple(cmd, feerate_res, strlen(feerate_res));
 	if (!tokens) {
 		err = tal_fmt(cmd, "%s: json error (%.*s)?", cmd->methodname,
 			      (int)sizeof(feerate_res), feerate_res);
@@ -373,8 +373,8 @@ static struct command_result *estimatefees(struct command *cmd,
 		// case we need to return a null response to say that is not
 		// possible to estimate the feerate.
 		if (!feeratetok || !json_to_millionths(feerate_res, feeratetok,
-						       &feerates[i])) {
 			err = tal_fmt(cmd,
+						       &feerates[i])) {
 				      "%s: had no feerate for block %d (%.*s)?",
 				      cmd->methodname, targets[i],
 				      (int)sizeof(feerate_res), feerate_res);
