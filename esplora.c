@@ -30,6 +30,7 @@ static char *capath = NULL;
 static u64 verbose = 0;
 static bool debug = false;
 static long wait_time = 1000000;
+static int retry_time = 4;
 
 struct curl_memory_data {
   char *buffer;
@@ -87,26 +88,29 @@ static char *request(const struct command *cmd, const tal_t *ctx, const char *ur
 
   CURL *curl;
   CURLcode res;
-  struct curl_slist* headers = NULL;
   curl = curl_easy_init();
+
   if (!curl) {
     return NULL;
   }
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-  headers = curl_slist_append(headers, "Content-Type: application/json");
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  
   if (verbose != 0)
     curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
   if (cainfo_path != NULL)
     curl_easy_setopt(curl, CURLOPT_CAINFO, cainfo_path);
+
   if (capath != NULL)
     curl_easy_setopt(curl, CURLOPT_CAPATH, capath);
+
   if (post) {
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);
   }
+
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_memory_callback);
 
@@ -122,18 +126,18 @@ static char *request(const struct command *cmd, const tal_t *ctx, const char *ur
   if (response_code != 200) {
     plugin_log(cmd->plugin, LOG_INFORM, "Error code: %ld", response_code);
     int time = 0;
-    if(time < 4){
+    if(time < retry_time){
       time++;
       plugin_log(cmd->plugin, LOG_INFORM, "bad code answare, wait %ld before retry", wait_time);
       sleep(wait_time);
-      plugin_log(cmd->plugin, LOG_INFORM, "Retry request to server");
+      plugin_log(cmd->plugin, LOG_INFORM, "Retry request %d to server", time);
       goto label;
     }
     return tal_free(chunk.buffer);
   }
   curl_easy_cleanup(curl);
   tal_resize(&chunk.buffer, chunk.size);
-  return(char *) chunk.buffer;
+  return chunk.buffer;
 }
 
 static char *request_get(const struct command *cmd, const tal_t *ctx, const char *url) {
@@ -264,9 +268,9 @@ static struct command_result *getrawblockbyheight(struct command *cmd,
   plugin_log(cmd->plugin, LOG_INFORM, "blockhash: %s from %s", blockhash,
              blockhash_url);
   if (debug) {
-    int hash_len = strlen(blockhash);
+    int hash_len = tal_count(blockhash);
     plugin_log(cmd->plugin, LOG_INFORM, "Hash size %d = Patters Size %d", hash_len, blockhash_pattern_len);
-    //assert(hash_len == blockhash_pattern_len);
+    assert(hash_len == blockhash_pattern_len);
   }
   // Esplora serves raw block
   const char *block_url =
@@ -328,6 +332,8 @@ static struct command_result *estimatefees(struct command *cmd,
     return command_done_err(cmd, BCLI_ERROR, err, NULL);
   }
   // Get the feerate for each target
+  // TODO(vincenzopalazzo): With testet I have some error here
+  // The error print the following message: INFO plugin-esplora: err: estimatefees: had no feerate for block 5 ({\"14\":90)?
   for (size_t i = 0; i < ARRAY_SIZE(feerates); i++) {
     const jsmntok_t *feeratetok = json_get_member(
         feerate_res, tokens, tal_fmt(cmd->plugin, "%d", targets[i]));
@@ -565,10 +571,13 @@ int main(int argc, char *argv[]) {
                             "Set verbose output (default 0).", u64_option,
                             &verbose),
               plugin_option("debug-esplora", "bool",
-                            "Run esplora plugin in debug mode (default false)",
+                            "Run esplora plugin in debug mode (default false).",
                             charp_option, &debug),
-              plugin_option("esplora-retry-time", "int",
-                            "Set retry time in case of errors with the esplora API (default 100000)",
+              plugin_option("esplora-waiting-time", "int",
+                            "Set wait time in case of errors with the esplora API (default 100000).",
                             charp_option, &wait_time),
+              plugin_option("esplora-retry-time", "int",
+                            "Set the how many time esplora plugin should be retry the API call in cases of errors (default 4)",
+                            charp_option, &retry_time),
               NULL);
 }
