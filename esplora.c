@@ -360,8 +360,8 @@ static struct command_result *estimatefees(struct command *cmd,
 		err = tal_fmt(cmd, "%s: json error (%.*s)?", cmd->methodname,
 			      (int)sizeof(feerate_res), feerate_res);
 		plugin_log(cmd->plugin, LOG_INFORM, "err: %s", err);
-		return estimatefees_null_response(cmd);
 	}
+		return estimatefees_null_response(cmd);
 	// Get the feerate for each target
 	for (size_t i = 0; i < tal_count(feerates); i++) {
 		const jsmntok_t *feeratetok =
