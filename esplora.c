@@ -32,6 +32,9 @@ struct esplora {
 	/* Make curl request more verbose. */
 	bool verbose;
 
+  /* Make curl request over proxy socks5 */
+  bool proxy;
+  
 	/* How many times do we retry curl requests ? */
 	u32 n_retries;
 };
@@ -118,6 +121,9 @@ static u8 *request(const tal_t *ctx, const char *url, const bool post,
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
+  //TODO(vincenzopalazzo)
+  if(esplora->proxy)
+    curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
 	if (esplora->verbose)
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 	if (esplora->cainfo_path != NULL)
@@ -584,5 +590,7 @@ int main(int argc, char *argv[]) {
 		    plugin_option("esplora-retries", "string",
 				  "How many times should we retry a request to the"
 				  "endpoint before dying ?", u32_option, &esplora->n_retries),
+        plugin_option("esplora-proxy", "flag",
+                      "Enabel proxy", flag_option, &esplora->proxy),
 		    NULL);
 }
