@@ -21,6 +21,24 @@
 #include <inttypes.h>
 #include <plugins/libplugin.h>
 
+struct proxy_conf{
+
+  /* Simple flag to check if the proxy is enabled by configuration*/
+  bool proxy_enabled;
+
+  /* Proxy address, e.g: 127.0.0.1 */
+  char *address;
+
+  /* Proxy port, e.g: 9050 */
+  u64 port;
+
+  /*Flag that mean the the user want that the lightningd used always the proxy
+    Is possible run esplora without proxy, but if lightningd require the proxy always,
+    the plugin shoudl be stop is the alsways_used is equal to true and the proxy_disabled is equal to false.
+   */
+  bool always_used;
+};
+
 struct esplora {
 	/* The endpoint to query for Bitcoin data. */
 	char *endpoint;
@@ -33,12 +51,14 @@ struct esplora {
 	bool verbose;
 
   /* Make curl request over proxy socks5 */
-  bool proxy;
+  bool proxy_disabled;
   
 	/* How many times do we retry curl requests ? */
 	u32 n_retries;
 };
+
 static struct esplora *esplora;
+static struct proxy_conf *proxy_conf;
 
 struct curl_memory_data {
   u8 *memory;
@@ -122,7 +142,7 @@ static u8 *request(const tal_t *ctx, const char *url, const bool post,
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
   //TODO(vincenzopalazzo)
-  if(esplora->proxy)
+  if(!esplora->proxy_disabled)
     curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
 	if (esplora->verbose)
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
@@ -532,9 +552,19 @@ static struct command_result *sendrawtransaction(struct command *cmd,
   return command_finished(cmd, response);
 }
 
-static void init(struct plugin *p, const char *buffer UNUSED,
-                 const jsmntok_t *config UNUSED) {
+static void init(struct plugin *p, const char *buffer,
+                 const jsmntok_t *config) {
+
+  const jsmntok_t *address_tok = json_get_member(buffer, config, "address");
+  const jsmntok_t *port_tok = json_get_member(buffer, config, "port");
+ 
+  if (!address_tok && !port_tok) { 
+    proxy_conf->proxy_enabled = true;
+    proxy_conf->address = "127.0.0.1";
+    json_to_u64(buffer, port_tok, &proxy_conf->port);
+  }
   plugin_log(p, LOG_INFORM, "esplora initialized.");
+  plugin_log(p, LOG_INFORM, "Proxy configuration %s:%ld", proxy_conf->address, proxy_conf->port);
 }
 
 static struct esplora *new_esplora(const tal_t *ctx)
@@ -548,6 +578,18 @@ static struct esplora *new_esplora(const tal_t *ctx)
 	esplora->n_retries = 4;
 
 	return esplora;
+}
+
+static struct proxy_conf *new_proxy_conf(const tal_t *ctx)
+{
+  struct proxy_conf *proxy_conf = tal(ctx, struct proxy_conf);
+
+  proxy_conf->proxy_enabled = false;
+  proxy_conf->address = NULL;
+  proxy_conf->port = -1;
+  proxy_conf->always_used = false;
+
+  return proxy_conf;
 }
 
 static const struct plugin_command commands[] = {
@@ -571,7 +613,8 @@ int main(int argc, char *argv[]) {
 
 	/* Our global state. */
 	esplora = new_esplora(NULL);
-
+  proxy_conf = new_proxy_conf(NULL);
+ 
 	plugin_main(argv, init, PLUGIN_STATIC, false, NULL, commands,
 		    ARRAY_SIZE(commands), NULL, 0, NULL, 0,
 		    plugin_option("esplora-api-endpoint", "string",
@@ -590,7 +633,8 @@ int main(int argc, char *argv[]) {
 		    plugin_option("esplora-retries", "string",
 				  "How many times should we retry a request to the"
 				  "endpoint before dying ?", u32_option, &esplora->n_retries),
-        plugin_option("esplora-proxy", "flag",
-                      "Enabel proxy", flag_option, &esplora->proxy),
-		    NULL);
+        plugin_option("esplora-disable-proxy", "flag",
+                      "Flag that help o ignore the proxy setted inside lightningd conf.",
+                      flag_option, &esplora->proxy_disabled),
+        NULL);
 }
