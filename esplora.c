@@ -555,13 +555,18 @@ static struct command_result *sendrawtransaction(struct command *cmd,
 static void init(struct plugin *p, const char *buffer,
                  const jsmntok_t *config) {
 
-  const jsmntok_t *address_tok = json_get_member(buffer, config, "address");
-  const jsmntok_t *port_tok = json_get_member(buffer, config, "port");
- 
+  plugin_log(p, LOG_INFORM, "Buffer received is: %s", buffer);
+  const jsmntok_t *conf_tok = json_get_member(buffer, config, "configuration");
+  const jsmntok_t *proxy_tok = json_get_member(buffer, conf_tok, "proxy");
+  const jsmntok_t *address_tok = json_get_member(buffer, proxy_tok, "address");
+  const jsmntok_t *port_tok = json_get_member(buffer, proxy_tok, "port");
+
   if (!address_tok && !port_tok) { 
     proxy_conf->proxy_enabled = true;
     proxy_conf->address = "127.0.0.1";
     json_to_u64(buffer, port_tok, &proxy_conf->port);
+
+    proxy_conf->port = 12;
   }
   plugin_log(p, LOG_INFORM, "esplora initialized.");
   plugin_log(p, LOG_INFORM, "Proxy configuration %s:%ld", proxy_conf->address, proxy_conf->port);
