@@ -556,12 +556,14 @@ static void init(struct plugin *p, const char *buffer,
                  const jsmntok_t *config) {
 
   plugin_log(p, LOG_INFORM, "Buffer received is: %s", buffer);
-  const jsmntok_t *conf_tok = json_get_member(buffer, config, "configuration");
+  config = json_parse_simple(NULL, buffer, strlen(buffer));
+  const jsmntok_t *params_tok = json_get_member(buffer, config, "params");
+  const jsmntok_t *conf_tok = json_get_member(buffer, params_tok, "configuration");
   const jsmntok_t *proxy_tok = json_get_member(buffer, conf_tok, "proxy");
   const jsmntok_t *address_tok = json_get_member(buffer, proxy_tok, "address");
   const jsmntok_t *port_tok = json_get_member(buffer, proxy_tok, "port");
 
-  if (!address_tok && !port_tok) { 
+  if (address_tok && port_tok) { 
     proxy_conf->proxy_enabled = true;
     proxy_conf->address = "127.0.0.1";
     json_to_u64(buffer, port_tok, &proxy_conf->port);
