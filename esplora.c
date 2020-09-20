@@ -20,6 +20,12 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <plugins/libplugin.h>
+#include <stdlib.h>
+
+/* Esplora base URL */
+const char *BASE_URL = "https://blockstream.info";
+const char *BASE_URL_TORV2 = "http://explorernuoc63nb.onion";
+const char *BASE_URL_TORV3 = "http://explorerzydxu5ecjrkwceayqybizmpjjznk5izmitf2modhcusuqlid.onion";
 
 struct proxy_conf{
 
@@ -40,7 +46,8 @@ struct proxy_conf{
 };
 
 struct esplora {
-	/* The endpoint to query for Bitcoin data. */
+  
+  /* The endpoint to query for Bitcoin data. */
 	char *endpoint;
 
 	/* CA stuff for TLS. */
@@ -141,9 +148,15 @@ static u8 *request(const tal_t *ctx, const char *url, const bool post,
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip");
-  //TODO(vincenzopalazzo)
-  if(!esplora->proxy_disabled)
-    curl_easy_setopt(curl, CURLOPT_PROXY, "socks5h://127.0.0.1:9050");
+  if(!esplora->proxy_disabled && proxy_conf->proxy_enabled) {
+    int length = snprintf( NULL, 0, "%ld", proxy_conf->port);
+    //This contains +2 because I added the separator : before to add port number!
+    char* str = malloc(length + 2);
+    snprintf(str, length + 2, ":%ld", proxy_conf->port);
+    char *address = tal_strcat(ctx, proxy_conf->address, str);
+    char *curl_query = tal_strcat(ctx, "socks5h://", address);
+    curl_easy_setopt(curl, CURLOPT_PROXY, curl_query);
+  }
 	if (esplora->verbose)
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 	if (esplora->cainfo_path != NULL)
@@ -187,9 +200,12 @@ static char *get_network_from_genesis_block(const char *blockhash) {
   else if (strcmp(blockhash, "000000000933ea01ad0ee984209779baaec3ced90fa3f4087"
                              "19526f8d77f4943") == 0)
     return "test";
+  else if (strcmp(blockhash, "1466275836220db2944ca059a3a10ef6fd2ea684b0688d2c3"
+                             "79296888a206003") == 0)
+    return "liquidv1";
   else if (strcmp(blockhash, "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca5"
-                             "90b1a11466e2206") == 0)
-    return "regtest";
+	                           "90b1a11466e2206") == 0)
+		return "regtest";
   else
     return NULL;
 }
@@ -552,26 +568,62 @@ static struct command_result *sendrawtransaction(struct command *cmd,
   return command_finished(cmd, response);
 }
 
+static void configure_url(const char *network, bool proxy_enabled, bool torv3_enabled)
+{
+  if (proxy_enabled && !esplora->proxy_disabled) {
+    if (torv3_enabled)
+      esplora->endpoint = tal_strcat(NULL, BASE_URL_TORV3, network);
+    else
+      esplora->endpoint = tal_strcat(NULL, BASE_URL_TORV2, network);
+  } else {
+    esplora->endpoint = tal_strcat(NULL, BASE_URL, network);
+  }
+}
+    
+
+static bool configure_esplora_with_network(const char *network, bool proxy_enabled, bool torv3_enabled)
+{
+  if (streq(network, "testnet")) {
+    configure_url("/testnet/api", proxy_enabled, torv3_enabled);
+    return true;
+  } else if (streq(network, "bitcoin")) {
+    configure_url("/api", proxy_enabled, torv3_enabled);
+    return true;
+  } else if (streq(network, "liquid")) {
+    configure_url("/liquid/api", proxy_enabled, torv3_enabled);
+    return true;
+  }
+  //Unsupported network!
+  return false;
+}
+
 static void init(struct plugin *p, const char *buffer,
                  const jsmntok_t *config) {
 
-  plugin_log(p, LOG_INFORM, "Buffer received is: %s", buffer);
   config = json_parse_simple(NULL, buffer, strlen(buffer));
   const jsmntok_t *params_tok = json_get_member(buffer, config, "params");
   const jsmntok_t *conf_tok = json_get_member(buffer, params_tok, "configuration");
   const jsmntok_t *proxy_tok = json_get_member(buffer, conf_tok, "proxy");
-  const jsmntok_t *address_tok = json_get_member(buffer, proxy_tok, "address");
-  const jsmntok_t *port_tok = json_get_member(buffer, proxy_tok, "port");
-
-  if (address_tok && port_tok) { 
-    proxy_conf->proxy_enabled = true;
-    proxy_conf->address = "127.0.0.1";
-    json_to_u64(buffer, port_tok, &proxy_conf->port);
-
-    proxy_conf->port = 12;
+  if (proxy_tok) {
+    const jsmntok_t *address_tok = json_get_member(buffer, proxy_tok, "address");
+    const jsmntok_t *port_tok = json_get_member(buffer, proxy_tok, "port");
+    if (address_tok && port_tok) { 
+      proxy_conf->proxy_enabled = true;
+      proxy_conf->address = json_strdup(NULL, buffer, address_tok);
+      json_to_u64(buffer, port_tok, &proxy_conf->port);
+    }
   }
-  plugin_log(p, LOG_INFORM, "esplora initialized.");
-  plugin_log(p, LOG_INFORM, "Proxy configuration %s:%ld", proxy_conf->address, proxy_conf->port);
+
+  const jsmntok_t *network_tok = json_get_member(buffer, conf_tok, "network");
+  char *network = json_strdup(NULL, buffer, network_tok);
+  
+  if (!configure_esplora_with_network(network, proxy_conf->proxy_enabled, true))
+    plugin_log(p, LOG_UNUSUAL, "Network %s unsupported", network);
+  
+  plugin_log(p, LOG_INFORM, "------------ esplora initialized ------------");
+  plugin_log(p, LOG_INFORM, "esplora endpoint %s", esplora->endpoint);
+  if (proxy_conf->proxy_enabled && !esplora->proxy_disabled)
+    plugin_log(p, LOG_INFORM, "proxy configuration %s:%ld", proxy_conf->address, proxy_conf->port);
 }
 
 static struct esplora *new_esplora(const tal_t *ctx)
@@ -582,6 +634,7 @@ static struct esplora *new_esplora(const tal_t *ctx)
 	esplora->capath = NULL;
 	esplora->cainfo_path = NULL;
 	esplora->verbose = false;
+  esplora->proxy_disabled = false;
 	esplora->n_retries = 4;
 
 	return esplora;
@@ -593,7 +646,7 @@ static struct proxy_conf *new_proxy_conf(const tal_t *ctx)
 
   proxy_conf->proxy_enabled = false;
   proxy_conf->address = NULL;
-  proxy_conf->port = -1;
+  proxy_conf->port = 9050;
   proxy_conf->always_used = false;
 
   return proxy_conf;
@@ -624,10 +677,6 @@ int main(int argc, char *argv[]) {
  
 	plugin_main(argv, init, PLUGIN_STATIC, false, NULL, commands,
 		    ARRAY_SIZE(commands), NULL, 0, NULL, 0,
-		    plugin_option("esplora-api-endpoint", "string",
-				  "The URL of the esplora instance to hit "
-				  "(including '/api').",
-				  charp_option, &esplora->endpoint),
 		    plugin_option("esplora-cainfo", "string",
 				  "Set path to Certificate Authority (CA) bundle.",
 				  charp_option, &esplora->cainfo_path),
